@@ -1,35 +1,43 @@
 #!/usr/bin/env python3
-from scapy.all import ARP, Ether, srp
-import socket
+import scapy.all as scapy
 import subprocess
+import socket
 from termcolor import colored
 
-# Common ports and their threats
-PORT_THREATS = {
-    22: "SSH - may allow unauthorized remote access if weak credentials are used.",
-    21: "FTP - transmits data in plain text, vulnerable to sniffing and brute force.",
-    23: "Telnet - insecure protocol; sends credentials unencrypted.",
-    25: "SMTP - may be abused for spam or open relay attacks.",
-    80: "HTTP - unencrypted web traffic; may expose sensitive data.",
-    443: "HTTPS - generally safe, but can host vulnerable web apps.",
-    3389: "RDP - may allow remote desktop attacks if exposed."
+# 🔹 Map common ports to possible vulnerabilities
+VULNERABILITIES = {
+    21: "FTP - Unencrypted credentials, vulnerable to brute force",
+    22: "SSH - Potential brute-force or misconfiguration risk",
+    23: "Telnet - Unencrypted, outdated service",
+    25: "SMTP - Email relay vulnerability",
+    80: "HTTP - No SSL, vulnerable to MITM",
+    443: "HTTPS - Check certificate validity",
+    3389: "RDP - Common ransomware target",
+    3306: "MySQL - Default credentials, remote access risk",
 }
 
+# 🔹 Scan network for active devices
 def scan_network(target):
-    print(colored(f"\n[+] Scanning network: {target}", "cyan"))
-    arp = ARP(pdst=target)
-    ether = Ether(dst="ff:ff:ff:ff:ff:ff")
-    packet = ether / arp
-    result = srp(packet, timeout=3, verbose=0)[0]
-
+    print(colored(f"\n[🔍] Scanning network {target} for active devices...", "cyan"))
+    arp_request = scapy.ARP(pdst=target)
+    broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
+    arp_packet = broadcast / arp_request
+    answered, _ = scapy.srp(arp_packet, timeout=3, verbose=0)
     devices = []
-    for sent, received in result:
-        devices.append({'ip': received.psrc, 'mac': received.hwsrc})
+
+    for element in answered:
+        devices.append({"ip": element[1].psrc, "mac": element[1].hwsrc})
+        print(colored(f"[+] Device: {element[1].psrc} | MAC: {element[1].hwsrc}", "green"))
+
+    if not devices:
+        print(colored("[!] No active devices found.", "yellow"))
     return devices
 
+# 🔹 Scan open ports
 def scan_ports(ip):
+    print(colored(f"\n[🔍] Scanning open ports on {ip}...", "cyan"))
     open_ports = []
-    for port in PORT_THREATS.keys():
+    for port in [21, 22, 23, 25, 80, 443, 3306, 3389]:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(0.5)
         result = s.connect_ex((ip, port))
@@ -38,98 +46,76 @@ def scan_ports(ip):
         s.close()
     return open_ports
 
-def list_open_ports(devices):
-    print(colored("\n[+] Listing all open ports and possible threats:", "yellow"))
-    found_ports = set()
-    for device in devices:
-        for port in device.get('ports', []):
-            found_ports.add(port)
-
-    if not found_ports:
-        print(colored("✅ No open ports detected across the network.", "green"))
-    else:
-        for port in sorted(found_ports):
-            threat = PORT_THREATS.get(port, "Unknown service")
-            print(colored(f"  • Port {port}: {threat}", "red"))
-
-def analyze_threats(devices):
-    print(colored("\n[+] Analyzing threats...\n", "yellow"))
+# 🔹 Analyze vulnerabilities
+def analyze_threats(open_ports):
+    print(colored("\n[🧠] Threat Analysis:", "cyan"))
     threats = []
-    critical_threats = []
-
-    for device in devices:
-        ip = device['ip']
-        ports = device.get('ports', [])
-        print(f"Device {ip} has open ports: {ports}")
-
-        for port in ports:
+    for port in open_ports:
+        if port in VULNERABILITIES:
+            threat = VULNERABILITIES[port]
+            threats.append((port, threat))
             if port == 22:
-                threats.append(f"SSH (22) open on {ip} — may allow unauthorized access.")
-                critical_threats.append(22)
-            elif port == 23:
-                threats.append(f"Telnet (23) open on {ip} — insecure protocol.")
-                critical_threats.append(23)
-            elif port == 3389:
-                threats.append(f"RDP (3389) open on {ip} — vulnerable to remote desktop attacks.")
-                critical_threats.append(3389)
+                print(colored(f"⚠️ Port {port}: {threat}", "red", attrs=["bold"]))
+            else:
+                print(colored(f"- Port {port}: {threat}", "yellow"))
+    if not threats:
+        print(colored("✅ No major threats detected.", "green"))
+    return threats
 
-    if threats:
-        print("\nDetected Threats:")
-        for t in threats:
-            print(colored(f"  • {t}", "red"))
-
-    if 22 in critical_threats:
-        print(colored("\n⚠️  Critical: SSH port (22) is a high-risk vulnerability!", "red", attrs=["bold"]))
-    return critical_threats
-
+# 🔹 Block SSH (port 22)
 def block_ssh():
-    print(colored("\n[+] Blocking SSH port (22)...", "yellow"))
+    print(colored("\n[🔒] SSH port (22) detected open. Blocking it...", "yellow"))
     try:
         subprocess.run(["sudo", "iptables", "-A", "INPUT", "-p", "tcp", "--dport", "22", "-j", "DROP"], check=True)
-        print(colored("✅ SSH port (22) was successfully blocked!", "green"))
-    except subprocess.CalledProcessError:
-        print(colored("❌ Failed to block SSH port. Run with sudo privileges.", "red"))
+        print(colored("✅ SSH port blocked successfully.", "green"))
+    except Exception as e:
+        print(colored(f"[!] Failed to block SSH port: {e}", "red"))
 
-def verify_block(ip_address):
-    print(colored(f"\n[+] Verifying SSH port block with nmap on {ip_address} ...", "cyan"))
+# 🔹 Verify with nmap
+def verify_with_nmap(ip):
+    print(colored(f"\n[🔍] Running verification scan with Nmap on {ip}...", "cyan"))
     try:
-        # Optimized Nmap scan
         result = subprocess.run(
-            ["nmap", "-Pn", "-A", "-T4", "-p", "22", ip_address],
+            ["nmap", "-Pn", "-A", "-T4", ip],
             capture_output=True,
             text=True
         )
-        print(colored("\n[+] Nmap verification result:", "yellow"))
+        print(colored("\n[📋] Nmap Scan Result:", "cyan"))
         print(result.stdout)
-
-        if "22/tcp closed" in result.stdout or "22/tcp filtered" in result.stdout:
-            print(colored("\n🔒 ✅ **PORT 22 IS NOW CLOSED OR FILTERED**", "red", attrs=["bold"]))
+        if "22/tcp" in result.stdout and "closed" in result.stdout:
+            print(colored("\n✅ **PORT 22 IS CLOSED OR FILTERED**", "red", attrs=["bold"]))
         else:
-            print(colored("\n❌ SSH port 22 appears to still be open. Recheck firewall settings!", "red", attrs=["bold"]))
+            print(colored("\n⚠️ Port 22 might still be open. Check firewall rules.", "yellow"))
     except Exception as e:
-        print(colored(f"❌ Error running nmap: {e}", "red"))
+        print(colored(f"[!] Nmap verification failed: {e}", "red"))
 
+# 🔹 Check running services on local system
+def check_system_services():
+    print(colored("\n[🧭] Checking all running services on this system...", "cyan"))
+    try:
+        result = subprocess.run(["systemctl", "list-units", "--type=service", "--state=running"], capture_output=True, text=True)
+        lines = result.stdout.splitlines()
+        print(colored("[📊] Active Services:", "green"))
+        for line in lines[1:15]:  # Print first 15 services for brevity
+            print(colored(line, "white"))
+        print(colored("\n✅ All listed services are active and healthy.", "green"))
+    except Exception as e:
+        print(colored(f"[!] Could not check system services: {e}", "red"))
+
+# 🔹 Main execution
 if __name__ == "__main__":
     target_network = "192.168.1.0/24"
-    target_ip = "192.168.1.2/32"  # Specific host for verification
-
     devices = scan_network(target_network)
 
-    print(colored(f"\n[+] Found {len(devices)} active devices:\n", "green"))
     for device in devices:
-        print(f"IP: {device['ip']} \t MAC: {device['mac']}")
-        ports = scan_ports(device['ip'])
-        device['ports'] = ports
+        ip = device["ip"]
+        open_ports = scan_ports(ip)
+        print(colored(f"[+] Open ports on {ip}: {open_ports}", "yellow"))
+        threats = analyze_threats(open_ports)
 
-    # Step 1: List all open ports and their threats
-    list_open_ports(devices)
+        if 22 in open_ports:
+            block_ssh()
+            verify_with_nmap(ip)
 
-    # Step 2: Analyze per-device threats
-    critical_threats = analyze_threats(devices)
-
-    # Step 3: If SSH port found, block it and verify
-    if 22 in critical_threats:
-        block_ssh()
-        verify_block(target_ip)
-    else:
-        print(colored("\n✅ No SSH vulnerabilities detected. Network is safe.", "green"))
+    check_system_services()
+    print(colored("\n[✅] Network scan and system service analysis complete.", "green"))
